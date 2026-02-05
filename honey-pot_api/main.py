@@ -6,6 +6,7 @@ from enum import Enum
 import re
 import sys
 import os
+import requests
 
 from fastapi import Depends
 from pydantic import BaseModel
@@ -17,6 +18,9 @@ load_dotenv(env_path)
 
 from services.auth import api_key_auth
 from services.server import app
+
+# GUVI Callback Configuration
+GUVI_CALLBACK_URL = "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
 
 # ============================================================
 # LLM CONFIGURATION (Cost-Optimized: ~$0.002 per request)
@@ -210,18 +214,53 @@ def extract_upi_ids(text: str) -> List[str]:
 
 
 def extract_phone_numbers(text: str) -> List[str]:
-    pattern = r"\b[6-9]\d{9}\b"
-    return re.findall(pattern, text)
+    # Match Indian phone numbers with or without +91 prefix
+    patterns = [
+        r"\+91\s?[6-9]\d{9}\b",  # +91 format
+        r"\b[6-9]\d{9}\b"         # 10-digit format
+    ]
+    results = []
+    for pattern in patterns:
+        results.extend(re.findall(pattern, text))
+    return list(set(results))
+
+
+def extract_bank_accounts(text: str) -> List[str]:
+    """Extract bank account numbers from text."""
+    # First, remove phone numbers from text to avoid false positives
+    text_clean = re.sub(r'\+91\s?[6-9]\d{9}', '', text)  # Remove +91 format phones
+    text_clean = re.sub(r'\b[6-9]\d{9}\b', '', text_clean)  # Remove 10-digit phones
+    
+    patterns = [
+        r"\b\d{4}[-\s]\d{4}[-\s]\d{4}(?:[-\s]\d{0,4})?\b",  # XXXX-XXXX-XXXX format
+        r"\b\d{11,16}\b",  # 11-16 digit account numbers (avoid 10-digit phones)
+    ]
+    results = []
+    for pattern in patterns:
+        matches = re.findall(pattern, text_clean)
+        for match in matches:
+            # Clean value
+            clean = match.strip()
+            clean_digits = re.sub(r'[-\s]', '', clean)
+            # Must have at least 11 digits to avoid phone number overlap
+            if len(clean_digits) >= 11 and len(clean_digits) <= 18:
+                results.append(clean)
+    return list(set(results))
 
 
 def extract_links(text: str) -> List[str]:
     pattern = r"https?://[^\s<>\"{}|\\^`\[\]]+"
-    return re.findall(pattern, text)
+    links = re.findall(pattern, text)
+    # Clean trailing punctuation
+    cleaned = []
+    for link in links:
+        cleaned.append(link.rstrip('!.,;:?'))
+    return list(set(cleaned))
 
 
 def extract_all(text: str, turn: int) -> Dict[str, List[ExtractedIntel]]:
     """Extract all intelligence from message."""
-    result = {"upiIds": [], "phoneNumbers": [], "links": []}
+    result = {"upiIds": [], "phoneNumbers": [], "links": [], "bankAccounts": []}
     
     def get_context(value: str, full_text: str) -> str:
         idx = full_text.lower().find(value.lower())
@@ -235,6 +274,8 @@ def extract_all(text: str, turn: int) -> Dict[str, List[ExtractedIntel]]:
         result["phoneNumbers"].append(ExtractedIntel("phone", phone, 0.85, turn, get_context(phone, text)))
     for link in extract_links(text):
         result["links"].append(ExtractedIntel("link", link, 0.95, turn, get_context(link, text)))
+    for account in extract_bank_accounts(text):
+        result["bankAccounts"].append(ExtractedIntel("bank", account, 0.8, turn, get_context(account, text)))
     
     return result
 
@@ -261,13 +302,13 @@ class Session:
     scam_type: Optional[str] = None
     all_messages: List[str] = field(default_factory=list)
     chat_history: List[ChatMessage] = field(default_factory=list)  # Full conversation
-    intelligence: Dict[str, List[Dict]] = field(default_factory=lambda: {"upiIds": [], "phoneNumbers": [], "links": []})
+    intelligence: Dict[str, List[Dict]] = field(default_factory=lambda: {"upiIds": [], "phoneNumbers": [], "links": [], "bankAccounts": []})
     behavior_profile: BehaviorProfile = field(default_factory=BehaviorProfile)
     is_complete: bool = False
 
 
 sessions: Dict[str, Session] = {}
-global_intel_tracker = {"upiIds": {}, "phoneNumbers": {}, "links": {}}
+global_intel_tracker = {"upiIds": {}, "phoneNumbers": {}, "links": {}, "bankAccounts": {}}
 
 
 def get_or_create_session(session_id: str) -> Session:
@@ -277,7 +318,7 @@ def get_or_create_session(session_id: str) -> Session:
 
 
 def track_global_intel(session_id: str, intel: Dict[str, List]) -> None:
-    for intel_type in ["upiIds", "phoneNumbers", "links"]:
+    for intel_type in ["upiIds", "phoneNumbers", "links", "bankAccounts"]:
         for item in intel.get(intel_type, []):
             value = item["value"] if isinstance(item, dict) else item
             if value not in global_intel_tracker[intel_type]:
@@ -287,8 +328,8 @@ def track_global_intel(session_id: str, intel: Dict[str, List]) -> None:
 
 
 def get_cross_session_links(intel: Dict[str, List]) -> Dict[str, Dict[str, int]]:
-    linked = {"upiIds": {}, "phoneNumbers": {}, "links": {}}
-    for intel_type in ["upiIds", "phoneNumbers", "links"]:
+    linked = {"upiIds": {}, "phoneNumbers": {}, "links": {}, "bankAccounts": {}}
+    for intel_type in ["upiIds", "phoneNumbers", "links", "bankAccounts"]:
         for item in intel.get(intel_type, []):
             value = item["value"] if isinstance(item, dict) else item
             sessions_list = global_intel_tracker[intel_type].get(value, [])
@@ -327,7 +368,7 @@ def classify_scam_type(messages: List[str]) -> str:
 
 def calculate_agent_confidence(session: Session) -> float:
     confidence = 0.3 if session.scam_detected else 0.0
-    intel_count = sum(len(session.intelligence.get(k, [])) for k in ["upiIds", "phoneNumbers", "links"])
+    intel_count = sum(len(session.intelligence.get(k, [])) for k in ["upiIds", "phoneNumbers", "links", "bankAccounts"])
     confidence += min(intel_count * 0.1, 0.3)
     if session.behavior_profile.urgency_score > 0.5:
         confidence += 0.1
@@ -338,27 +379,91 @@ def calculate_agent_confidence(session: Session) -> float:
     return min(round(confidence, 2), 1.0)
 
 
+def extract_suspicious_keywords(messages: List[str]) -> List[str]:
+    """Extract suspicious keywords from conversation."""
+    suspicious = [
+        "urgent", "verify now", "account blocked", "immediately", 
+        "suspended", "freeze", "otp", "share", "transfer", 
+        "kyc", "update", "expire", "deadline", "penalty"
+    ]
+    found = set()
+    text = " ".join(messages).lower()
+    for keyword in suspicious:
+        if keyword in text:
+            found.add(keyword)
+    return list(found)
+
+
 def build_callback_payload(session: Session, cross_links: Dict) -> Dict[str, Any]:
-    formatted_intel = []
-    for intel_type in ["upiIds", "phoneNumbers", "links"]:
-        for item in session.intelligence.get(intel_type, []):
-            formatted_intel.append({
-                "type": intel_type,
-                "value": item["value"],
-                "confidence": item.get("confidence", 0.8)
-            })
+    """Build GUVI-compliant callback payload."""
+    # Extract values into GUVI format
+    bank_accounts = [item["value"] for item in session.intelligence.get("bankAccounts", [])]
+    upi_ids = [item["value"] for item in session.intelligence.get("upiIds", [])]
     
+    # Format phone numbers with +91 prefix as per GUVI spec
+    raw_phones = [item["value"] for item in session.intelligence.get("phoneNumbers", [])]
+    phone_numbers = []
+    for phone in raw_phones:
+        if phone.startswith("+91"):
+            phone_numbers.append(phone)
+        else:
+            phone_numbers.append(f"+91{phone}")
+    
+    phishing_links = [item["value"] for item in session.intelligence.get("links", [])]
+    suspicious_keywords = extract_suspicious_keywords(session.all_messages)
+    
+    # Build agent notes from behavior profile
+    behavior = session.behavior_profile
+    notes_parts = []
+    if behavior.urgency_score > 0.5:
+        notes_parts.append("Scammer used urgency tactics")
+    if behavior.payment_turn > 0:
+        notes_parts.append("payment redirection attempted")
+    if behavior.threat_count > 0:
+        notes_parts.append("threats detected")
+    if behavior.identity_claims:
+        notes_parts.append(f"claimed to be {', '.join(behavior.identity_claims)}")
+    agent_notes = ". ".join(notes_parts) if notes_parts else "Standard scam engagement completed"
+    
+    # GUVI-compliant payload
     return {
         "sessionId": session.session_id,
         "scamDetected": session.scam_detected,
-        "scamType": session.scam_type or "UNKNOWN",
-        "conversationTurns": session.turns,
-        "extractedIntelligence": formatted_intel,
-        "agentConfidence": calculate_agent_confidence(session),
-        "behaviorProfile": get_behavior_summary(session.behavior_profile),
-        "crossSessionLinks": {k: v for k, v in cross_links.items() if v},
-        "exitReason": "max_intel_collected" if len(formatted_intel) >= 3 else "conversation_ended"
+        "totalMessagesExchanged": len(session.chat_history),
+        "extractedIntelligence": {
+            "bankAccounts": bank_accounts,
+            "upiIds": upi_ids,
+            "phishingLinks": phishing_links,
+            "phoneNumbers": phone_numbers,
+            "suspiciousKeywords": suspicious_keywords
+        },
+        "agentNotes": agent_notes
     }
+
+
+def send_guvi_callback(payload: Dict[str, Any]) -> bool:
+    """Send final result to GUVI evaluation endpoint."""
+    try:
+        print(f"\n{'='*50}")
+        print("📡 SENDING TO GUVI CALLBACK:")
+        print(f"URL: {GUVI_CALLBACK_URL}")
+        print(f"Payload: {payload}")
+        
+        response = requests.post(
+            GUVI_CALLBACK_URL,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
+        
+        print(f"Response Status: {response.status_code}")
+        print(f"Response Body: {response.text}")
+        print("="*50 + "\n")
+        
+        return response.status_code == 200
+    except Exception as e:
+        print(f"❌ GUVI Callback Error: {e}")
+        return False
 
 
 # ============================================================
@@ -403,7 +508,7 @@ def get_reply(state: AgentState, turn: int, scammer_message: str = "") -> str:
 
 
 # ============================================================
-# API MODELS
+# API MODELS (GUVI Spec Compliant)
 # ============================================================
 
 class Message(BaseModel):
@@ -412,20 +517,29 @@ class Message(BaseModel):
     timestamp: Optional[int] = None
 
 
+class HistoryMessage(BaseModel):
+    sender: str
+    text: str
+    timestamp: Optional[int] = None
+
+
+class Metadata(BaseModel):
+    channel: Optional[str] = None
+    language: Optional[str] = "English"
+    locale: Optional[str] = "IN"
+
+
 class HoneypotRequest(BaseModel):
     sessionId: str
     message: Message
+    conversationHistory: Optional[List[HistoryMessage]] = []
+    metadata: Optional[Metadata] = None
 
 
 class HoneypotResponse(BaseModel):
+    """GUVI expects only status + reply. Extra fields are optional."""
     status: str
     reply: str
-    scamType: Optional[str] = None
-    agentConfidence: Optional[float] = None
-    agentState: Optional[str] = None
-    crossSessionLinks: Optional[Dict] = None
-    isComplete: Optional[bool] = None
-    callbackPayload: Optional[Dict] = None
 
 
 # ============================================================
@@ -459,7 +573,7 @@ def honeypot_endpoint(
     
     # Already complete
     if session.is_complete:
-        return HoneypotResponse(status="success", reply="Thank you, I will check this later.", isComplete=True)
+        return HoneypotResponse(status="success", reply="Thank you, I will check this later.")
     
     # Process scammer messages
     if sender == "scammer":
@@ -467,7 +581,7 @@ def honeypot_endpoint(
         
         # Extract intelligence
         extracted = extract_all(text, session.turns)
-        for intel_type in ["upiIds", "phoneNumbers", "links"]:
+        for intel_type in ["upiIds", "phoneNumbers", "links", "bankAccounts"]:
             for item in extracted.get(intel_type, []):
                 session.intelligence[intel_type].append({
                     "value": item.value,
@@ -488,13 +602,13 @@ def honeypot_endpoint(
                 session.scam_detected = True
                 session.scam_type = classify_scam_type(session.all_messages)
             else:
-                return HoneypotResponse(status="success", reply="Okay, I understand.", agentState=session.state.value)
+                return HoneypotResponse(status="success", reply="Okay, I understand.")
         
         # Update scam type
         session.scam_type = classify_scam_type(session.all_messages)
         
         # Update state
-        intel_count = sum(len(session.intelligence.get(k, [])) for k in ["upiIds", "phoneNumbers", "links"])
+        intel_count = sum(len(session.intelligence.get(k, [])) for k in ["upiIds", "phoneNumbers", "links", "bankAccounts"])
         session.state = get_next_state(
             session.state, session.turns,
             session.behavior_profile.payment_turn > 0,
@@ -516,28 +630,20 @@ def honeypot_endpoint(
         # Log progress
         print(f"[Turn {session.turns}] State: {session.state.value}, Intel: {intel_count}, Confidence: {agent_confidence}")
         
-        # Check exit
+        # Check exit - send GUVI callback
         if session.state == AgentState.EXIT:
             session.is_complete = True
             callback = build_callback_payload(session, cross_links)
-            print("\n" + "="*50 + "\n📡 GUVI CALLBACK PAYLOAD:\n" + str(callback) + "\n" + "="*50)
             
-            return HoneypotResponse(
-                status="success", reply=reply_text, scamType=session.scam_type,
-                agentConfidence=agent_confidence, agentState=session.state.value,
-                crossSessionLinks=cross_links if any(cross_links.values()) else None,
-                isComplete=True, callbackPayload=callback
-            )
+            # Send to GUVI evaluation endpoint
+            send_guvi_callback(callback)
+            
+            return HoneypotResponse(status="success", reply=reply_text)
         
-        return HoneypotResponse(
-            status="success", reply=reply_text, scamType=session.scam_type,
-            agentConfidence=agent_confidence, agentState=session.state.value,
-            crossSessionLinks=cross_links if any(cross_links.values()) else None,
-            isComplete=False
-        )
+        return HoneypotResponse(status="success", reply=reply_text)
     
     # Non-scammer
-    return HoneypotResponse(status="success", reply="Okay.", agentState=session.state.value)
+    return HoneypotResponse(status="success", reply="Okay.")
 
 
 @app.get("/")

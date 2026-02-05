@@ -1,8 +1,16 @@
 # API key authentication helper
+import os
 from fastapi import Header, HTTPException, status
+from dotenv import load_dotenv
 
-# Hardcoded API key for the hackathon
-API_KEY = "SLEPPYcoder2026"
+# Load environment variables
+load_dotenv()
+
+# Load API key from environment variable
+API_KEY = os.getenv("API_KEY")
+
+if not API_KEY:
+    raise RuntimeError("API_KEY environment variable is not set")
 
 
 def api_key_auth(x_api_key: str = Header(None)) -> str:
