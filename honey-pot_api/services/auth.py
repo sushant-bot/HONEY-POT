@@ -6,11 +6,8 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Load API key from environment variable
-API_KEY = os.getenv("API_KEY")
-
-if not API_KEY:
-    raise RuntimeError("API_KEY environment variable is not set")
+# Hardcoded API key (fallback if env not set)
+API_KEY = os.getenv("API_KEY", "honeypot_live_84xKp2M9TqZ6W3J1D7")
 
 
 def api_key_auth(x_api_key: str = Header(None)) -> str:
