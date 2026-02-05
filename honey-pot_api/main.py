@@ -32,8 +32,8 @@ LLM_CONFIG = {
     "temperature": 0.3,         # Low = consistent responses
     "max_tokens": 40,           # Short responses only (saves tokens)
 }
+# sushant chat dekh h kap
 
-# Persona system prompt (kept short to save tokens)
 SYSTEM_PROMPT = """You are a worried 45-year-old Indian person who is not tech-savvy.
 Rules:
 - Sound scared and confused
@@ -540,6 +540,23 @@ def honeypot_endpoint(
     return HoneypotResponse(status="success", reply="Okay.", agentState=session.state.value)
 
 
+@app.get("/")
+def root():
+    """Landing page."""
+    return {
+        "service": "🍯 Honeypot API",
+        "version": "1.0.0",
+        "status": "running",
+        "docs": "/docs",
+        "endpoints": {
+            "honeypot": "POST /api/honeypot",
+            "session": "GET /api/session/{id}",
+            "chat": "GET /api/chat/{id}",
+            "health": "GET /health"
+        }
+    }
+
+
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "service": "honeypot-api"}
@@ -590,3 +607,5 @@ def get_chat_history(session_id: str, _api_key: str = Depends(api_key_auth)):
         "intelligenceExtracted": session.intelligence,
         "conversation": conversation
     }
+
+
