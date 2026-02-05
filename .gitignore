@@ -1,0 +1,7 @@
+# Ignore these files
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.log
