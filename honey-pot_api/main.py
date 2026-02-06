@@ -36,7 +36,7 @@ LLM_CONFIG = {
     "temperature": 0.3,         # Low = consistent responses
     "max_tokens": 40,           # Short responses only (saves tokens)
 }
-# sushant chat dekh h kap
+# 
 
 SYSTEM_PROMPT = """You are a worried 45-year-old Indian person who is not tech-savvy.
 Rules:
