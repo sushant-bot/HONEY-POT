@@ -135,10 +135,3 @@ See [requirements.txt](requirements.txt) for full dependencies.
 - No real personal information is ever shared
 - All extracted intelligence is logged securely
 
-## License
-
-MIT License
-
-## Acknowledgments
-
-Built for the GUVI Hackathon.
